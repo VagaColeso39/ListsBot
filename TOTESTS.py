@@ -1,3 +1,2 @@
-import hashlib
-token = hashlib.sha256('ters1234'.encode())
-
+a = {'1': '2'}
+print(i for i in a.values())

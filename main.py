@@ -1,26 +1,14 @@
-import aiogram
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.dispatcher.filters import Filter
 import asyncio
 import sqlite3
 import random
 import hashlib
 from adds import *
 
-
-class UserStateFilter(Filter):
-    def __init__(self, state: str):
-        self.state = state
-
-
-    async def __call__(self, message:Message) -> bool:
-        return users[message.chat.id] == self.state
-
-
 TOKEN = "5857365241:AAFw-p6c5MUuuFlhdlpqE4VTugM_Ah37R8c"
 bot = Bot(TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 conn = sqlite3.connect('main.db')
 conn.isolation_level = None
@@ -28,8 +16,6 @@ cursor = sqlite3.Cursor(conn)
 
 groups = {}
 users = {}
-
-
 
 
 async def check_user(tg_id: int):
@@ -45,7 +31,7 @@ async def create_token(user_id: int, group_name: str):
 
 
 class Item:
-    def __init__(self, group_id: int, item_id, name: str, hint: str = None):
+    def __init__(self, group_id: int, item_id: int, name: str, hint: str = ''):
         self.group_id = group_id
         self.id = item_id
         self.name = name
@@ -57,9 +43,10 @@ class User:
                  invitations: list = None, new=False):
         """groups: dict(group_id: Group)
            invitations: list(group_id)"""
-        self.tg_id = tg_id
+        self.id = tg_id
         self.name = name
         self.language = language
+        self.state = (False,)
         if groups is not None:
             self.groups = groups
         else:
@@ -72,30 +59,37 @@ class User:
         if new:
             cursor.execute(CREATE_USER, (tg_id, name, 'ru'))
 
-    def turn_notifications(self, group_id: int):
-        self.groups[group_id].change_notification(self.tg_id)
+    async def turn_notifications(self, group_id: int):
+        await self.groups[group_id].change_notification(self.id)
 
-    def add_group(self, group_id: int):
+    async def add_group(self, group_id: int):
         self.groups[group_id] = groups[group_id]
 
-    def add_invitation(self, group_id: int):
-        self.invitations.append(group_id)
+    async def leave_from_group(self, group_id: int):
+        del self.groups[group_id]
+
+    async def add_invitation(self, group_id: int, inviter_id: int):
+        self.invitations.append((group_id, inviter_id))
 
     async def create_group(self, group_name: str):
-        check = cursor.execute(GET_GROUP_ID_BY_NAME_AND_USER_ID, (group_name, self.tg_id)).fetchone()
+        check = cursor.execute(GET_GROUP_ID_BY_NAME_AND_USER_ID, (group_name, self.id)).fetchone()
         if check:
             return False
 
-        token = await create_token(self.tg_id, group_name)
-        cursor.execute(CREATE_GROUP, (group_name, self.tg_id, token))
-        group_id = cursor.execute(GET_GROUP_ID_BY_TOKEN, (token,)).fetchone()
-        groups[group_id] = Group(group_id, group_name, self.tg_id, token)
-        self.add_group(group_id)
+        token = await create_token(self.id, group_name)
+        cursor.execute(CREATE_GROUP, (group_name, self.id, token))
+        group_id = cursor.execute(GET_GROUP_ID_BY_TOKEN, (token,)).fetchone()[0]
+        cursor.execute(ADD_PARTICIPANT, (group_id, self.id))
+        groups[group_id] = Group(group_id, group_name, self.id, token)
+        await self.add_group(group_id)
+        await groups[group_id].add_participant(self.id)
+
+        return True
 
 
 class Group:
-    def __init__(self, id: int, name: str, owner_id: int, token: str, participants: list[User] = None,
-                 items: list[Item] = None,
+    def __init__(self, id: int, name: str, owner_id: int, token: str, participants: dict['id': User] = None,
+                 items: dict["id": Item] = None,
                  notifications: dict["id": bool] = None):
         self.id = id
         self.name = name
@@ -104,7 +98,7 @@ class Group:
         if participants is not None:
             self.participants = participants
         else:
-            self.participants = []
+            self.participants = {}
         if notifications is not None:
             self.notifications = notifications
         else:
@@ -112,63 +106,286 @@ class Group:
         if items is not None:
             self.items = items
         else:
-            self.items = []
+            self.items = {}
 
-    def change_notification(self, user_id):
+    async def change_notification(self, user_id: int):
         self.notifications[user_id] = not self.notifications[user_id]
 
-    def create_invitation(self, receiver_id: int):
-        users[receiver_id].add_invitation(self.id)
+    async def create_invitation(self, receiver_id: int, inviter_id: int):
+        await users[receiver_id].add_invitation(self.id, inviter_id)
 
-    def add_participant(self, user_id):
-        self.participants.append(users[user_id])
+    async def add_participant(self, user_id: int):
+        self.participants[user_id] = users[user_id]
 
-    def add_item(self, item: Item):
-        self.items.append(item)
+    async def add_item(self, item: Item):
+        self.items[item.id] = item
+
+    async def comment_item(self, item_id: int, item_hint: str, user_id: int, lang: str):
+        item_hint = f'{item_hint} ({replies["by"][lang]} @{users[user_id].name})'
+        self.items[item_id].hint = item_hint
+        cursor.execute(CHANGE_COMMENT, (item_hint, self.id, item_id))
+
+    async def delete_item(self, item_id: int):
+        del self.items[item_id]
+        cursor.execute(DELETE_ITEM, (self.id, item_id))
+
+    async def delete_user(self, user_id: int):
+        del self.participants[user_id]
+        await users[user_id].leave_from_group(self.id)
+        cursor.execute(DELETE_PARTICIPANT, (self.id, user_id))
 
 
-@dp.callback_query_handler(lang_cb.filter())
-async def lang_change(callback: CallbackQuery, callback_data: dict):
+async def formate_items(lang, group_id):
+    items = groups[group_id].items.values()
+    string = replies['group_items'][lang] + '\n'.join(
+        f'{item.name} ({item.hint})' if item.hint else item.name for item in items)
+    return string
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'add_item'))
+async def create_item_starter(callback: CallbackQuery, callback_data: CallbackData):
+    user_id = callback.message.chat.id
+    users[user_id].state = ('add_item', callback_data.group_id)
+    await callback.message.edit_text(replies['add_item'][users[user_id].language])
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'delete_item'))
+async def delete_item_starter(callback: CallbackQuery, callback_data: CallbackData):
+    items = groups[callback_data.group_id].items.values()
+    info = ((item.name, item.id) for item in items)
+    user_id = callback.message.chat.id
+    kb = await items_deletion_kb_gen(info, callback_data.group_id)
+    await callback.message.edit_text(replies['item_deletion'][users[user_id].language], reply_markup=kb)
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'comment_item'))
+async def comment_item_starter(callback: CallbackQuery, callback_data: CallbackData):
+    items = groups[callback_data.group_id].items.values()
+    info = ((item.name, item.id) for item in items)
+    user_id = callback.message.chat.id
+    kb = await items_commentary_kb_gen(info, callback_data.group_id)
+    await callback.message.edit_text(replies['item_commentary'][users[user_id].language], reply_markup=kb)
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'group_settings'))
+async def group_settings(callback: CallbackQuery, callback_data: CallbackData):
+    user_id = callback.message.chat.id
+    group_id = callback_data.group_id
+    lang = users[user_id].language
+    kb = await group_settings_kb_gen(group_id, lang)
+    await callback.message.edit_text(replies['group_settings'][lang], reply_markup=kb)
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'invite_user'))
+async def invite_user(callback: CallbackQuery, callback_data: CallbackData):
+    user_id = callback.message.chat.id
+    group_id = callback_data.group_id
+    lang = users[user_id].language
+    await callback.message.edit_text(replies['invite_user'][lang])
+    users[user_id].state = ('inviting', group_id)
+
+
+@dp.callback_query(GroupActCb.filter(F.action == 'main_menu'))
+async def move_to_main_menu(callback: CallbackQuery, callback_data: CallbackData):
+    await callback.message.edit_text(replies['main_menu'][users[callback.message.chat.id].language],
+                                     reply_markup=await kb_generator('main', users[callback.message.chat.id].language))
+
+
+@dp.callback_query(ItemDlCb.filter())
+async def delete_item(callback: CallbackQuery, callback_data: CallbackData):
+    item_id = callback_data.item_id
+    group_id = callback_data.group_id
+    user_id = callback.message.chat.id
+    lang = users[user_id].language
+    if item_id == -1:
+        string = await formate_items(lang, group_id)
+        await callback.message.edit_text(string, reply_markup=await group_actions_kb_gen(group_id, lang))
+        return
+    await groups[group_id].delete_item(item_id)
+    await callback.message.edit_text(replies['item_deleted'][lang])
+    string = await formate_items(lang, group_id)
+    await callback.message.answer(string, reply_markup=await group_actions_kb_gen(group_id, lang))
+
+
+@dp.callback_query(ItemComCb.filter())
+async def comment_item_handler(callback: CallbackQuery, callback_data: CallbackData):
+    item_id = callback_data.item_id
+    group_id = callback_data.group_id
+    user_id = callback.message.chat.id
+    lang = users[user_id].language
+    if item_id == -1:
+        string = await formate_items(lang, group_id)
+        await callback.message.edit_text(string, reply_markup=await group_actions_kb_gen(group_id, lang))
+        return
+    users[user_id].state = ('comment_item', group_id, item_id)
+    await callback.message.edit_text(replies['item_comment'][lang])
+
+
+@dp.callback_query(LangCb.filter())
+async def lang_change(callback: CallbackQuery, callback_data: CallbackData):
     tg_id = callback.message.chat.id
-    lang = callback_data['value']
+    lang = callback_data.value
     if lang == 'ru':
         users[tg_id].language = 'ru'
     else:
         users[tg_id].language = 'en'
-    await callback.message.answer(replies['main_menu'][lang], reply_markup=await kb_generator('main', lang))
+    await callback.message.edit_text(replies['main_menu'][lang], reply_markup=await kb_generator('main', lang))
     cursor.execute(CHANGE_LANGUAGE_BY_ID, (lang, tg_id))
 
 
-@dp.callback_query_handler(text='groups')
+@dp.callback_query(F.data == 'groups')
 async def groups_list_handler(callback: CallbackQuery):
     user_id = callback.message.chat.id
-    t = [(g.id, g.name) for g in users[user_id].groups.items()]
+    t = [(groups[group_id].id, groups[group_id].name) for group_id in users[user_id].groups.keys()]
     kb = await groups_cb_kb_generator(t)
-    await callback.message.answer(replies['groups_list'][users[user_id].language], reply_markup=kb)
+    await callback.message.edit_text(replies['groups_list'][users[user_id].language], reply_markup=kb)
 
 
-@dp.callback_query_handler(text='create_group')
-async def group_creator_handler(callback: CallbackQuery):
+@dp.callback_query(F.data == 'create_group')
+async def group_namer_handler(callback: CallbackQuery):
     user_id = callback.message.chat.id
-    users[user_id].creating_group = True
-    await callback.message.answer(replies['name_group'][users[user_id].language])
+    users[user_id].state = ('group_creation',)
+    await callback.message.edit_text(replies['name_group'][users[user_id].language])
 
 
-@dp.callback_query_handler(groups_cb.filter())
-async def group_cb_handler(callback: CallbackQuery, callback_data: dict):
-    group_id = callback_data['id']
-    items = groups[group_id].items
+@dp.callback_query(F.data == 'invites')
+async def invites_list_handler(callback: CallbackQuery):
+    user_id = callback.message.chat.id
+    invitations: list[int, int, int] = users[user_id].invitations # group_id, inviter_id, invite_id
+    invitations_for_gen = []
+    for invite in invitations:
+        invitations_for_gen.append((f'{groups[invite[0]].name}, {users[invite[1]].name}', invite[0], invite[2]))
+    kb = await invites_actions_kb_gen(invitations_for_gen)
+
+
+@dp.callback_query(GroupSettingsCb.filter(F.setting == 'leave_group'))
+async def get_token_setting(callback: CallbackQuery, callback_data: CallbackData):
+    group_id = callback_data.group_id
+    user_id = callback.message.chat.id
+    lang = users[user_id].language
+    await groups[group_id].delete_user(user_id)
+    await callback.message.edit_text(replies['group_items'][lang], reply_markup=await kb_generator('main', lang))
+
+
+@dp.callback_query(GroupSettingsCb.filter(F.setting == 'get_token'))
+async def get_token_setting(callback: CallbackQuery, callback_data: CallbackData):
+    group_id = callback_data.group_id
+    token = groups[group_id].token
+    await callback.message.answer(f'`{token}`', parse_mode="MARKDOWN")
+
+
+@dp.callback_query(GroupsCb.filter())
+async def group_cb_handler(callback: CallbackQuery, callback_data: CallbackData):
+    group_id = callback_data.id
     lang = users[callback.message.chat.id].language
-    string = replies['group_items'][lang] + '\n'.join(f'{item.name} ({item.hint})' for item in items)
-    await callback.message.answer(string)
+    string = await formate_items(lang, group_id)
+    await callback.message.edit_text(string, reply_markup=await group_actions_kb_gen(group_id, lang))
 
 
-@dp.message_handler(commands=['lang', 'language'])
+@dp.message(lambda x: users[x.chat.id].state[0] == 'add_item')
+async def create_item(message: Message):
+    user_id = message.chat.id
+    group_id = users[user_id].state[1]
+    lang = users[message.chat.id].language
+    if message.text == '!':
+        await message.answer(replies['group_items'][lang],
+                             reply_markup=await group_actions_kb_gen(group_id, lang))
+        await message.delete()
+        return
+    skipped = []
+    for item_name in message.text.split(', '):
+        if cursor.execute(GET_ITEM_ID_BY_PARAMS, (group_id, item_name)).fetchone():
+            skipped.append(item_name)
+            continue
+        cursor.execute(ADD_ITEM, (group_id, item_name, ''))
+        item_id = cursor.execute(GET_ITEM_ID_BY_PARAMS, (group_id, item_name)).fetchone()[0]
+        item = Item(group_id, item_id, item_name)
+        await groups[group_id].add_item(item)
+        await message.answer(replies['item_added'][lang])
+
+    if skipped:
+        await message.answer(replies['item_skipped'][lang] + ', '.join(skipped))
+
+    string = await formate_items(lang, group_id)
+    await message.answer(string, reply_markup=await group_actions_kb_gen(group_id, lang))
+
+
+@dp.message(lambda x: users[x.chat.id].state[0] == 'group_creation')
+async def group_creation_handler(message: Message):
+    user_id = message.chat.id
+
+    if message.text == '!':
+        await message.answer(replies['main_menu'][users[user_id].language],
+                             reply_markup=await kb_generator('main', users[user_id].language))
+        await message.delete()
+        return
+    if await users[user_id].create_group(message.text):
+        await message.answer(replies['group_created'][users[user_id].language],
+                             reply_markup=await kb_generator('main', users[message.chat.id].language))
+        users[user_id].state = False
+    else:
+        await message.answer(replies['group_creation_fail'][users[user_id].language])
+
+
+@dp.message(lambda x: users[x.chat.id].state[0] == 'comment_item')
+async def comment_item(message: Message):
+    user_id = message.chat.id
+    language = users[user_id].language
+    _, group_id, item_id = users[user_id].state
+    if message.text == '!':
+        await message.answer(await formate_items(language, group_id),
+                             reply_markup=await group_actions_kb_gen(group_id, language))
+        await message.delete()
+        return
+    await groups[group_id].comment_item(item_id, message.text, user_id, language)
+    await message.answer(replies['item_commented'][language])
+    await message.answer(await formate_items(language, group_id),
+                         reply_markup=await group_actions_kb_gen(group_id, language))
+
+
+@dp.message(lambda x: users[x.chat.id].state[0] == 'inviting')
+async def invite_user(message: Message):
+    user_id = message.chat.id
+    language = users[user_id].language
+    group_id = users[user_id].state[1]
+    if message.text == '!':
+        await message.answer(await formate_items(language, group_id),
+                             reply_markup=await group_actions_kb_gen(group_id, language))
+        await message.delete()
+        return
+    passed = []
+    at_least_one = False
+    for info in message.text.split(', '):
+        invited_id = (0,)
+        if '@' == info[0]:
+            invited_id = cursor.execute(CHECK_USER_BY_NAME, (info[1:],)).fetchone()
+        elif info.isdigit():
+            invited_id = cursor.execute(CHECK_USER_BY_ID, (int(info),)).fetchone()
+
+        if invited_id:
+            invited_id = invited_id[0]
+            cursor.execute(ADD_INVITATION, (group_id, invited_id, user_id))
+            await groups[group_id].create_invitation(invited_id, user_id)
+            at_least_one = True
+
+        else:
+            passed.append(info)
+
+        if at_least_one:
+            await message.answer(replies['inviting_completed'[language]])
+
+        if passed:
+            await message.answer(replies['inviting_missed'][language] + '\n'.join(passed))
+        await message.answer(await formate_items(language, group_id),
+                             reply_markup=await group_actions_kb_gen(group_id, language))
+
+
+@dp.message(F.text.in_({'/lang', '/language'}))
 async def change_language(message: Message):
     await message.answer('Выберите язык/Choose language', reply_markup=LANGUAGE_KEYBOARD)
 
 
-@dp.message_handler(commands=['start'])
+@dp.message(F.text.in_({'/start'}))
 async def start_menu(message: Message):
     tg_id = message.chat.id
     if not await check_user(tg_id):
@@ -177,26 +394,24 @@ async def start_menu(message: Message):
 
     await message.answer(replies['main_menu'][users[tg_id].language],
                          reply_markup=await kb_generator('main', users[tg_id].language))
-
-
-dp.message_handler()
+    await message.delete()
 
 
 async def main():
     for user_info in cursor.execute(GET_ALL_USERS).fetchall():
         users[user_info[0]] = User(user_info[0], user_info[1], user_info[2])
-        for group_id in cursor.execute(GET_INVITATION_BY_TG_ID, (user_info[0],)).fetchall():
-            users[user_info[0]].add_invitation(group_id)
+        for invitation_info in cursor.execute(GET_INVITATION_BY_TG_ID, (user_info[0],)).fetchall():
+            await users[user_info[0]].add_invitation(invitation_info[0], invitation_info[1])
 
     for group_info in cursor.execute(GET_ALL_GROUPS).fetchall():
         groups[group_info[0]] = Group(group_info[0], group_info[1], group_info[3], group_info[2])
         for participant_id in cursor.execute(GET_GROUP_PARTICIPANTS, (group_info[0],)).fetchall():
-            groups[group_info[0]].add_participant(participant_id)
-            users[participant_id].add_group(group_info[0])
+            await groups[group_info[0]].add_participant(participant_id[0])
+            await users[participant_id[0]].add_group(group_info[0])
         for item_info in cursor.execute(GET_ITEMS_BY_GROUP_ID, (group_info[0],)).fetchall():
-            groups[group_info[0]].add_item(Item(group_info[0], item_info[0], item_info[1], item_info[2]))
+            await groups[group_info[0]].add_item(Item(group_info[0], item_info[0], item_info[1], item_info[2]))
 
-    await dp.start_polling()
+    await dp.start_polling(bot)
 
 
 if __name__ == '__main__':
