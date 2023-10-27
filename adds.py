@@ -15,6 +15,7 @@ class InvActCb(CallbackData, prefix='invAction'):
     invite_id: int
     group_id: int
 
+
 class GroupActCb(CallbackData, prefix='groupAct'):
     group_id: int
     action: str
@@ -67,10 +68,12 @@ async def invites_actions_kb_gen(invitations_info: list[tuple[str, int, int]]):
     """invitations_info: invite_prompt, group_id, invite_id"""
     kb = InlineKeyboardBuilder()
     for invite in invitations_info:
-        kb.button(text=invite[0], callback_data=InvActCb(invite_id=invitations_info[2], group_id=invitations_info[1]).pack())
+        kb.button(text=invite[0],
+                  callback_data=InvActCb(invite_id=invitations_info[2], group_id=invitations_info[1]).pack())
     kb.button(text='❌', callback_data=InvActCb(invite_id=-1, group_id=invitations_info[1]).pack())
     kb.adjust(*(4, 4, 4, 4))
     return kb.as_markup()
+
 
 async def items_deletion_kb_gen(items_info: tuple[tuple[str, int]], group_id: int):
     kb = InlineKeyboardBuilder()
@@ -81,7 +84,7 @@ async def items_deletion_kb_gen(items_info: tuple[tuple[str, int]], group_id: in
     return kb.as_markup()
 
 
-async def items_commentary_kb_gen(items_info: tuple[tuple[str, int]], group_id: int):
+async def items_commentary_kb_gen(items_info: tuple[tuple[str, int]], group_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for item in items_info:
         kb.button(text=item[0], callback_data=ItemComCb(item_id=item[1], group_id=group_id).pack())
@@ -144,7 +147,9 @@ replies = {'by': {'en': 'by', 'ru': 'от'},
            'groups_list': {'en': 'List of your groups:\n', 'ru': 'Список ваших групп:\n'},
            'group_settings': {'en': 'Group settings:', 'ru': 'Настройки группы:'},
            'group_items': {'en': 'Items in your group:\n', 'ru': 'Предметы в вашей группе:\n'},
-           'name_group': {'en': 'Name your group (or send "!" to cancel creation)', 'ru': 'Назовите свою группу (отправьте "!" чтобы вернуться в главное меню)'},
+           'name_group': {'en': 'Name your group (or send "!" to cancel creation)',
+                          'ru': 'Назовите свою группу (отправьте "!" чтобы вернуться в главное меню)'},
+           'invites_list': {'ru': 'Входящие приглашения:', 'en': 'Ingoing invites:'},
            'invite_user': {
                'en': 'send username in format @username or use user_id if you know it. Also you can send multiple invites by separating them with commas. Send "!" to cancel inviting',
                'ru': 'Отправьте имя пользователя в формате @username или используйте id пользователя если вы его знаете. Так же можете отправить несколько приглашений разделив их запятыми. Отправьте "!" чтобы вернуться в главное меню'},
@@ -152,8 +157,9 @@ replies = {'by': {'en': 'by', 'ru': 'от'},
                              'en': 'group successfully created, returning you back to the menu...'},
            'group_creation_fail': {'ru': 'У вас уже есть группа с таким названием, введите другое название:',
                                    'en': 'You already have a group with the same name, try other name'},
-           'add_item': {'ru': 'Введите название добавляемой позиции или несколько названий разделенных запятыми (Либо введите "!" чтобы вернуться):',
-                        'en': 'Enter the name of the item you adding or several names separated by commas (or send "!" to cancel adding):'},
+           'add_item': {
+               'ru': 'Введите название добавляемой позиции или несколько названий разделенных запятыми (Либо введите "!" чтобы вернуться):',
+               'en': 'Enter the name of the item you adding or several names separated by commas (or send "!" to cancel adding):'},
            'item_added': {'ru': 'Позиции успешно добавлены, возращаю вас к группе...',
                           'en': 'Items successfully added, returning you to the group...'},
            'item_comment': {'ru': 'Введите новый комментарий для позиции (Либо введите "!" чтобы вернуться):',

@@ -251,11 +251,13 @@ async def group_namer_handler(callback: CallbackQuery):
 @dp.callback_query(F.data == 'invites')
 async def invites_list_handler(callback: CallbackQuery):
     user_id = callback.message.chat.id
-    invitations: list[int, int, int] = users[user_id].invitations # group_id, inviter_id, invite_id
+    invitations: list[list[int, int, int]] = users[user_id].invitations  # group_id, inviter_id, invite_id
     invitations_for_gen = []
     for invite in invitations:
         invitations_for_gen.append((f'{groups[invite[0]].name}, {users[invite[1]].name}', invite[0], invite[2]))
     kb = await invites_actions_kb_gen(invitations_for_gen)
+    await callback.message.edit_text(replies['invites_list'][users[user_id].language], reply_markup=kb)
+
 
 
 @dp.callback_query(GroupSettingsCb.filter(F.setting == 'leave_group'))
