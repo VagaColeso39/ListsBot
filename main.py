@@ -168,7 +168,7 @@ class Group:
                                    reply_markup=await kb_generator('self_delete', participant.language))
 
 
-async def formate_items(lang, group_id):
+def formate_items(lang, group_id):
     items = groups[group_id].items.values()
     string = replies['group_items'][lang] + '\n'.join(
         f'{item.name} ({item.hint.split("ㅤ")[-1][1:]})...' if item.hint else item.name for item in items)
