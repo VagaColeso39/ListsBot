@@ -6,7 +6,7 @@ import random
 import hashlib
 from adds import *
 
-TOKEN = "5857365241:AAFw-p6c5MUuuFlhdlpqE4VTugM_Ah37R8c"
+TOKEN = 'MYTOKEN'
 bot = Bot(TOKEN)
 dp = Dispatcher()
 
@@ -168,7 +168,7 @@ class Group:
                                    reply_markup=await kb_generator('self_delete', participant.language))
 
 
-def formate_items(lang, group_id):
+async def formate_items(lang, group_id):
     items = groups[group_id].items.values()
     string = replies['group_items'][lang] + '\n'.join(
         f'{item.name} ({item.hint.split("ㅤ")[-1][1:]})...' if item.hint else item.name for item in items)
@@ -186,6 +186,7 @@ async def create_item_starter(callback: CallbackQuery, callback_data: CallbackDa
         return
     users[user_id].state = ('add_item', group_id)
     await callback.message.edit_text(replies['add_item'][users[user_id].language])
+
 
 
 @dp.callback_query(GroupActCb.filter(F.action == 'delete_item'))
